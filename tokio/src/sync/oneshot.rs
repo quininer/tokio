@@ -343,6 +343,23 @@ impl<T> Sender<T> {
         let state = State::load(&inner.state, Acquire);
         state.is_closed()
     }
+
+    pub fn into_raw(self) -> *const T {
+        match self.inner {
+            Some(inner) => inner.into_raw() as _,
+            None => std::ptr::null()
+        }
+    }
+
+    pub unsafe fn from_raw(ptr: *const T) -> Sender<T> {
+        if !ptr.is_null() {
+            Sender {
+                inner: Some(Arc::from_raw(ptr as *const Inner<T>))
+            }
+        } else {
+            Sender { inner: None }
+        }
+    }
 }
 
 impl<T> Drop for Sender<T> {

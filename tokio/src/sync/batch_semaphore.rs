@@ -15,7 +15,7 @@
 //! use-case like tokio's read-write lock, writers will not be starved by
 //! readers.
 use crate::loom::cell::UnsafeCell;
-use crate::loom::sync::atomic::AtomicUsize;
+use crate::loom::sync::atomic::{AtomicUsize, spin_loop_hint};
 use crate::loom::sync::{Mutex, MutexGuard};
 use crate::util::linked_list::{self, LinkedList};
 
@@ -104,6 +104,7 @@ impl Semaphore {
     // as a flag indicating that the semaphore has been closed. Consequently
     // PERMIT_SHIFT is used to leave that bit for that purpose.
     const PERMIT_SHIFT: usize = 1;
+    const MAX_SPIN_COUNT: usize = 8;
 
     /// Creates a new semaphore with the initial number of permits
     ///
@@ -273,6 +274,7 @@ impl Semaphore {
         // First, try to take the requested number of permits from the
         // semaphore.
         let mut curr = self.permits.load(Acquire);
+        let mut spin_count = 0;
         let mut waiters = loop {
             // Has the semaphore closed?
             if curr & Self::CLOSED > 0 {
@@ -292,6 +294,19 @@ impl Semaphore {
             };
 
             if remaining > 0 && lock.is_none() {
+                // Try spin,
+                // but if there are too many remaining, just slow path.
+                if !queued && remaining <= needed && spin_count < Self::MAX_SPIN_COUNT {
+                    spin_count += 1;
+
+                    for _ in 0..(1 << spin_count) {
+                        spin_loop_hint();
+                    }
+
+                    curr = self.permits.load(Acquire);
+                    continue
+                }
+
                 // No permits were immediately available, so this permit will
                 // (probably) need to wait. We'll need to acquire a lock on the
                 // wait queue before continuing. We need to do this _before_ the
@@ -312,6 +327,7 @@ impl Semaphore {
                             break self.waiters.lock().unwrap();
                         }
                     }
+
                     break lock.expect("lock must be acquired before waiting");
                 }
                 Err(actual) => curr = actual,
